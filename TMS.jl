@@ -22,4 +22,24 @@ function main()
 
     @show sites[1]
 
+    @show "Building PXP Hamiltonian"
+    H = PXP_Hamiltonian(sites)
+    @show H
+
+end
+
+function PXP_Hamiltonian(sites)
+    ampo = AutoMPO()
+    N = length(sites)
+    for j = 1:N
+        if j==1
+            ampo += 1.0,"ProjDn",N,"X",1,"ProjDn",2
+        elseif j==N
+            ampo += 1.0,"ProjDn",N-1,"X",N,"ProjDn",1
+        else
+            ampo += 1.0,"ProjDn",j-1,"X",j,"ProjDn",j+1
+        end
+    end
+    H = MPO(ampo, sites)
+    return H
 end
