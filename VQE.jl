@@ -3,6 +3,7 @@ using ITensorMPS
 using Printf
 using Statistics: mean
 using HDF5
+using CairoMakie
 
 function build_O_eff(H::MPO, H2::MPO, E_targ, E_curr, a, b)
     # Builds the effective operator O_eff = (a + b)*H2 - 2*(a*E_curr + b*E_targ)*H
@@ -110,7 +111,7 @@ function findScars()
 
     n_targ = 40
     weight = 100.0
-    ΔEmin = 0.05 * N
+    ΔEmin = 0.1
     σ_thre = 0.1
 
     idx = 1
@@ -189,4 +190,33 @@ function findScars()
 
     return ψs, Es
 
+end
+
+function plot(nFiles, N)
+    Es = Float64[]
+    Z2_olap = Float64[]
+
+    for k in 1:nFiles
+        f = h5open("data2/N$(N)_$(k).h5", "r")
+        E = read(f, "energy")
+        ψ = read(f, "ψ", MPS)
+        close(f)
+
+        Z2 = Z2state(siteinds(ψ))
+        olap = inner(ψ, Z2)
+        olap = abs(olap)^2
+        olap = log10(olap)
+
+        @printf("File %d: E=%.12f, Z2_overlap=%.6f\n", k, E/N, olap)
+
+        push!(Es, E/N)
+        push!(Z2_olap, olap)
+    end
+
+    fig = Figure(size=(800, 600))
+    ax = Axis(fig[1, 1], xlabel=L"E/N", ylabel = L"\log_{10} |\langle Z_2 | \Psi_n \rangle|^2")
+    scatter!(ax, Es, Z2_olap, color=:blue, markersize=8)
+    # ylims!(ax, -10, 0)
+    xlims!(ax, -0.8, 0.8)
+    return fig
 end
