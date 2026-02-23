@@ -14,18 +14,19 @@ using Statistics
 function main()
     N = 20
     scars = MPS[]
-    E_min, E_max = -0.6*N, 0.6*N
-    # for i in 1:N+1
-    #     E0 = E_den[i]
-    #     @printf("Running for E0=%.12f\n", E0)
-    #     run(E0, N, i,scars)
-    # end
+    # E_min, E_max = -0.6*N, 0.6*N
+    # # for i in 1:N+1
+    # #     E0 = E_den[i]
+    # #     @printf("Running for E0=%.12f\n", E0)
+    # #     run(E0, N, i,scars)
+    # # end
 
-    run(E_min, E_max, N)
+    # run(E_min, E_max, N)
     
-    Z2_overlap = zeros(N+1)
-    Elist = zeros(N+1)
-    for k in 1:N+1
+    nn = 40
+    Z2_overlap = zeros(nn)
+    Elist = zeros(nn)
+    for k in 1:nn
         f = h5open("data/N$(N)_$(k).h5", "r")
         ψ = read(f, "ψ", MPS)
         close(f)
@@ -37,18 +38,29 @@ function main()
         Elist[k] = inner(ψ', H, ψ)
         Z2_overlap[k] = inner(ψ, Z2)
     end
+    @printf("Energies and Z2 overlaps for found states:\n")
+    for k in 1:nn
+        @printf("k=%d, E=%.12f, Z2_overlap=%.6f\n", k, Elist[k], Z2_overlap[k])
+    end
 
     @printf("Now time for the plot\n")
 
     Z2_overlap = abs.(Z2_overlap).^2
+    Z2_overlap = log10.(Z2_overlap)
     Elist = Elist ./ N
+
+     @printf("Energies and Z2 overlaps for found states:\n")
+    for k in 1:nn
+        @printf("k=%d, E=%.12f, Z2_overlap=%.6f\n", k, Elist[k], Z2_overlap[k])
+    end
 
     fig = Figure(resolution=(800, 600))
     ax = Axis(fig[1, 1],
                 xlabel = L"E/L",
                 ylabel = L"\log_{10} |\langle Z_2 | \Psi_n \rangle|^2",
                 title = "Overlap of TMS states with Z2 state")
-                scatter!(ax, Elist, log10.(Z2_overlap))
+    scatter!(ax, Elist, Z2_overlap, color=:blue, markersize=10)
+    ylims!(ax, -10, 0)
                 # save("data/TMS.pdf", fig)
 
     return fig
@@ -346,7 +358,7 @@ function verifyScar(site, H, Ψs, Es)
             println()
         end
 
-        println("\n[4] Half-chain entanglement entropy (volume law upper bound = $(round(S_vol,digits=3))):")
+        println("\n[4] Half-chain entanglement entropy (volume law upper bound = $(S_vol)):")
         # Verifying Entropy
         for (k, ψ) in enumerate(Ψs)
             S     = SvN_ent(copy(ψ))
@@ -378,17 +390,19 @@ function isScar(ψ, H, sites; σ_tol = 0.1, S_tol = nothing, olap_tol = 1e-3)
         return false
     end
     
-    S_tol = isnothing(S_tol) ? log(2)*N/2 : S_tol
+    S_tol = isnothing(S_tol) ? log(2)*N/4 : S_tol
     S = SvN_ent(copy(ψ))
     if S > S_tol
+        @printf("State rejected due to high entanglement entropy: S=%.4f > S_tol=%.4f\n", S, S_tol)
         return false
     end
 
-    ψZ2 = Z2state(sites)
-    ov2 = abs2(inner(ψZ2, ψ))
-    if ov2 < olap_tol
-        return false
-    end
+    # ψZ2 = Z2state(sites)
+    # ov2 = abs2(inner(ψZ2, ψ))
+    # if ov2 < olap_tol
+    #     @printf("State rejected due to low overlap with Z2 state: |⟨Z2|ψ⟩|²=%.6f < olap_tol=%.6f\n", ov2, olap_tol)
+    #     return false
+    # end
 
     return true
 end
@@ -438,8 +452,10 @@ function extractScars()
     Es = Float64[]
 
     Etarg = range(Emin, Emax, length=ntarg)
+    idx = 1
 
     for (k,E) in enumerate(Etarg)
+
         @printf("Extracting scar state %d with target energy E=%.12f\n", k, E)
         H2 = H - E*Id
 
@@ -471,18 +487,20 @@ function extractScars()
 
         if isScar(ψ, H, sites; σ_tol=σ_thre, olap_tol=ol_thre)
             @printf("  Found scar state with E=%.12f, variance=%.2e\n", E_found, var_found)
+            push!(ψs, ψ)
+            push!(Es, E_found)
+
+            f = h5open("data/N$(N)_$(idx).h5", "w")
+            write(f, "ψ", ψ)
+            close(f)
+            
+            idx += 1
         else
             @printf("  State with E=%.12f does not meet scar criteria (variance=%.2e)\n", E_found, var_found)
             continue
         end
 
-        push!(ψs, ψ)
-        push!(Es, E_found)
-
-        h5open("data/N$(N)_$(k).h5", "w") do f
-            write(f, "ψ", ψ)
-        end
-
+        
     end
 
     perm = sortperm(Es)
