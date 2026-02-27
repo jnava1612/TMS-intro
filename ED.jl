@@ -26,6 +26,11 @@ function constrainedBasis(N::Int)
     return basis, index
 end
 
+function Z2state(sites)
+    states = [isodd(n) ? "Up" : "Dn" for n in 1:length(sites)]
+    return productMPS(sites, states)
+end
+
 function sparsePXP(N::Int, basis::Vector{Int}, index::Dict{Int,Int})
     D = length(basis)
     rows = Int[]
@@ -229,9 +234,10 @@ function PXP_Hamiltonian(sites)
     return MPO(ampo, sites)
 end
 
-function scars_to_MPS(scar_idx, evecs, basis, sites;
+function scars_to_MPS(scar_idx, evecs, basis, sites, index::Dict{Int,Int};
                         maxD=200, cutoff=1e-12, evals=nothing, H_mpo=nothing)
     scar_mps = MPS[]
+    Z2 = Z2state(sites)
     for (idx, i) in enumerate(scar_idx)
         v = evecs[:, i]
         E_ED = isnothing(evals) ? nothing : evals[i]
@@ -242,6 +248,10 @@ function scars_to_MPS(scar_idx, evecs, basis, sites;
                 write(f, "energy", E_ED)
                 write(f, "mps_tensor", ψ)
             end
+            o2 = inner(Z2, ψ)^2
+            ovelap = overlapZ2(v, basis, length(sites), index)
+            @printf("  Scar %d: E=%.6f  O_Z2=%.2e  O_Z2_MPS=%.2e\n", idx, E_ED, ovelap, o2)
+        
         else
             @warn "Skipping MPS conversion for scar index $i due to energy mismatch."
         end
