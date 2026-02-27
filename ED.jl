@@ -4,6 +4,10 @@ using Printf
 using Statistics: mean, std
 using DataFrames
 using CSV
+using CairoMakie
+using ITensors
+using ITensorMPS
+using HDF5
 
 function constrainedBasis(N::Int)
     basis = Int[]
@@ -95,7 +99,7 @@ end
 
 function identifyScars(evals::Vector{Float64}, evecs::Matrix{Float64},
                     basis::Vector{Int}, N::Int, index::Dict{Int,Int}; 
-                    overlap_tol = 1e-4, S_thr = 0.4)
+                    overlap_tol = 1e-5, S_thr = 0.3)
 
     D = length(evals)
     S_vol = log(2) * N/2
@@ -112,7 +116,7 @@ function identifyScars(evals::Vector{Float64}, evecs::Matrix{Float64},
 
     scars_idx = Int[]
     for i in 1:D
-        if entropies[i] < S_thr*S_vol && overlaps[i] > 1e-4
+        if entropies[i] < S_thr*S_vol && overlaps[i] > overlap_tol
             push!(scars_idx, i)
         end
     end
@@ -129,7 +133,7 @@ function identifyScars(evals::Vector{Float64}, evecs::Matrix{Float64},
 end
 
 
-function runED(N::Int; S_thr = 0.4, ov_thr = 1e-4, verbose = true)
+function runED(N::Int; S_thr = 0.3, ov_thr = 1e-5, verbose = true)
     basis, index = constrainedBasis(N)
     H_sp = sparsePXP(N, basis, index)
     D = length(basis)
@@ -160,11 +164,87 @@ function runED(N::Int; S_thr = 0.4, ov_thr = 1e-4, verbose = true)
 
     df = DataFrame(Energy = evals, Entropy = entropies, Overlap = overlaps)
 
-    CSV.write("full_spectrum.csv", df)
+    CSV.write("full_spectrum2.csv", df)
 
     df2 = DataFrame(Energy = evals[scar_idx], Entropy = entropies[scar_idx], Overlap = overlaps[scar_idx])
 
-    CSV.write("scar_states.csv", df2)
+    println("Plotting $(length(scar_idx)) scar candidates...")
 
-    return scar_idx, evals, evecs, diagnostic
+    fig  = Figure(size=(800, 600))
+    ax = Axis(fig[1, 1], xlabel=L"E/N", ylabel = L"\log_{10} |\langle Z_2 | \Psi_n \rangle|^2")
+    scatter!(ax, df2.Energy, log10.(df2.Overlap), color=:blue, markersize=8)
+    # ylims!(ax, -25, 0)
+    xlims!(ax, -0.8, 0.8)
+    # title!(ax, "PXP Scar Candidates: N=$N, S_thr=$(S_thr), O_thr=$(ov_thr)")
+    display(fig)
+
+    CSV.write("scar_states2.csv", df2)
+
+    evecs2 = evecs[:, scar_idx]
+    h5open("scar_states2.h5", "w") do file
+        write(file, "energies", evals[scar_idx])
+        write(file, "entropies", entropies[scar_idx])
+        write(file, "overlaps", overlaps[scar_idx])
+        write(file, "evecs", evecs2)
+    end
+
+    return scar_idx, evals, evecs, df2
+end
+
+function eig_to_MPS(v::Vector{Float64}, basis::Vector{Int}, sites;
+                     maxD=200, cutoff=1e-12, E_ED=nothing, H_mpo=nothing)
+    N = length(sites)
+    Ψ_tensor = ITensor(sites)
+    for (i, state_int) in enumerate(basis)
+        config = [sites[j] => 2 - ((state_int >> (j-1)) & 1) for j in 1:N]
+        Ψ_tensor[config...] = v[i]
+    end
+    Ψ_tensor /= norm(Ψ_tensor)
+    ψ = MPS(Ψ_tensor, sites; maxdim=maxD, cutoff=cutoff)
+    done = true
+
+    if !isnothing(H_mpo) && !isnothing(E_ED)
+        E_mps = inner(ψ', H_mpo, ψ)
+        @printf("  E_ED = %+.8f   E_MPS = %+.8f   ΔE = %.2e\n",
+                E_ED, E_mps, abs(E_mps - E_ED))
+        
+        if abs(E_mps - E_ED) > 1e-4
+            @warn "Energy mismatch — check basis ordering convention"
+            done = false
+        end
+    end
+
+    return ψ, done
+end
+
+function PXP_Hamiltonian(sites)
+    # This code considers only the periodic case
+    N = length(sites)
+    ampo = OpSum()
+    for j in 1:N
+        prev = mod1(j - 1, N)
+        next = mod1(j + 1, N)
+        ampo += 1.0, "ProjDn", prev, "X", j, "ProjDn", next
+    end
+    return MPO(ampo, sites)
+end
+
+function scars_to_MPS(scar_idx, evecs, basis, sites;
+                        maxD=200, cutoff=1e-12, evals=nothing, H_mpo=nothing)
+    scar_mps = MPS[]
+    for (idx, i) in enumerate(scar_idx)
+        v = evecs[:, i]
+        E_ED = isnothing(evals) ? nothing : evals[i]
+        ψ, done = eig_to_MPS(v, basis, sites; maxD=maxD, cutoff=cutoff, E_ED=E_ED, H_mpo=H_mpo)
+        if done
+            push!(scar_mps, ψ)
+            h5open("scar_$(idx).h5", "w") do f
+                write(f, "energy", E_ED)
+                write(f, "mps_tensor", ψ)
+            end
+        else
+            @warn "Skipping MPS conversion for scar index $i due to energy mismatch."
+        end
+    end
+    return scar_mps
 end
