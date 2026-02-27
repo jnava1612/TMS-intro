@@ -243,14 +243,15 @@ function scars_to_MPS(scar_idx, evecs, basis, sites, index::Dict{Int,Int};
         E_ED = isnothing(evals) ? nothing : evals[i]
         ψ, done = eig_to_MPS(v, basis, sites; maxD=maxD, cutoff=cutoff, E_ED=E_ED, H_mpo=H_mpo)
         if done
+            o2 = inner(Z2, ψ)^2
+            overlap = overlapZ2(v, basis, length(sites), index)
+            @printf("  Scar %d: E=%.6f  O_Z2=%.2e  O_Z2_MPS=%.2e\n", idx, E_ED, overlap, o2)
             push!(scar_mps, ψ)
             h5open("scar_$(idx).h5", "w") do f
                 write(f, "energy", E_ED)
                 write(f, "mps_tensor", ψ)
+                write(f, "Z2_overlap", overlap)
             end
-            o2 = inner(Z2, ψ)^2
-            ovelap = overlapZ2(v, basis, length(sites), index)
-            @printf("  Scar %d: E=%.6f  O_Z2=%.2e  O_Z2_MPS=%.2e\n", idx, E_ED, ovelap, o2)
         
         else
             @warn "Skipping MPS conversion for scar index $i due to energy mismatch."
