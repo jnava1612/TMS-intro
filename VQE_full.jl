@@ -1,10 +1,10 @@
 using ITensors
-using ITensorsMPS
+using ITensorMPS
 using Printf
 using Statistics:mean
 using HDF5
 
-function uniformSites(sites, folder; fname = nothing)
+function uniformSites(sites, ψs, Es, folder; fname = nothing)
     if isnothing(fname)
         files = filter(f -> endswith(f, ".h5"), readdir(folder))
     else
@@ -13,9 +13,10 @@ function uniformSites(sites, folder; fname = nothing)
     
     for file in files
         println("Loading data from $file...")
-        h5open(joinpath(folder, file), "r") do f
-            ψ = read(f, "state")
-        end
+        f = h5open(joinpath(folder, file), "r")
+        ψ = read(f, "ψ", MPS)
+        E = read(f, "energy")
+        close(f)
         sites_psi = siteinds(ψ)
         for i in 1:length(ψ)
             ψ[i] = replaceind(ψ[i], sites_psi[i], sites[i])
@@ -24,8 +25,29 @@ function uniformSites(sites, folder; fname = nothing)
         HDF5.delete_object(f, "ψ")
         write(f, "ψ", ψ)
         close(f)
+        push!(ψs, ψ)
+        push!(Es, E)
     end
     return true
+end
+
+function checkMissing(energies; tolerance = 1.5, ω=1.33)
+    if length(energies) < 2
+        @printf("Not enough energies to check for missing states.\n")
+        return -1
+    end
+    @assert energies == sort(energies) "Energies must be sorted in ascending order"
+    spacings = diff(energies)
+    gap = minimum([median(spacings), mean(spacings), ω])
+
+    for (i, δ) in enumerate(spacings)
+        if δ > tolerance * gap
+            @printf("Warning: large gap detected between energies %.6f and %.6f (gap = %.2e)\n", 
+                    energies[i], energies[i+1], δ)
+            return i
+        end
+    end
+    return 0
 end
 
 function PXP_Hamiltonian(sites)
@@ -160,13 +182,12 @@ function isScar(ψ, H, PZ2, sites; σ_tol = 0.1, otol = 1e-25)
     return true
 end
 
-function minimize_3p(H, H2, PZ2, prevStates, ψ0, E_target, a, b, c;
+function minimize(H, H2, PZ2, prevStates, ψ0, E_target, a, b, c;
                     maxD = 200, n_iter = 30, n_sweeps = 4,
                     weight = 100.0, tol = 1e-8, σ_thre = 1e-6, ov2_thre = 1e-25)
     
     @assert abs(a+b+c-1.0) < 1e-10 "Coefficients a, b, c must sum to 1.0, got $(a+b+c)"
     @assert c>=0 "Coefficient c must be non-negative"
-    # @assert c<0.5 "Too large c>0.5: the optimization will focus too much on maximizing the overlap with the Z2 state and may miss scars with low overlap but low variance"
 
     ψ = copy(ψ0)
     normalize!(ψ)
@@ -183,7 +204,7 @@ function minimize_3p(H, H2, PZ2, prevStates, ψ0, E_target, a, b, c;
     @printf("Minimization started: E_target = %.2f, initial E = %.2f (a=%.2f, b=%.2f, c=%.2f)\n", E_target, E_curr, a, b, c)
 
     for iter in 1:n_iter
-        O_eff = build_O_eff_3p(H, H2, PZ2, E_target, E_curr, a, b, c)
+        O_eff = build_O_eff(H, H2, PZ2, E_target, E_curr, a, b, c)
         if isempty(prevStates)
             _, ψ = dmrg(O_eff, ψ, sweeps; outputlevel = 0)
         else
@@ -193,15 +214,7 @@ function minimize_3p(H, H2, PZ2, prevStates, ψ0, E_target, a, b, c;
         ψ = restrictHS(ψ, siteinds(ψ), maxD)
         E_curr = inner(ψ', H, ψ)
 
-        C, E, var, fold, ov2 = cost_3p(ψ, H, H2, PZ2, E_target, a, b, c)
-
-        # if var < σ_thre
-        #     σ_thre = var
-        # end
-        # if ov2 > ov2_thre
-        #     ov2_thre = ov2  
-        #     @printf("  New best overlap with Z2 state: %.2e\n", ov2)
-        # end
+        C, E, var, fold, ov2 = cost(ψ, H, H2, PZ2, E_target, a, b, c)
 
         @printf("Iter %d: E = %.12f, Var = %.2e, Fold = %.2e, Ov2 = %.2e, Cost = %.2e\n", iter, E, var, fold, ov2, C)
 
@@ -213,4 +226,191 @@ function minimize_3p(H, H2, PZ2, prevStates, ψ0, E_target, a, b, c;
     end
 
     return restrictHS(ψ, siteinds(ψ), maxD)
+end
+
+
+function findScars()
+    N = 20
+    maxD = 1200
+    cut = 1e-10
+
+    prevRuns = true # Set to true to read scars from previous runs and use them as warmup states, false to start from scratch
+    folder = "data5"
+    fname = nothing # Set to a specific filename to read only that file, or nothing to read all scars from the folder
+    idx = 5 # Starting index for saving scars, set to 1 if starting from scratch, or to the next available index if reading from previous runs
+
+    # Coefficients for the cost function, must sum to 1.0
+    a = 0.02
+    b = 0.31
+    c = 0.67
+
+    n_iter = 200 # Maximum number of iterations for the optimization, can be increased for better convergence but will take more time
+
+    E_min = -11.2
+    E_max = 11.2
+
+    n_targ = 40
+    weight = 100.0
+    ΔEmin = 1.0
+
+    σ_thre = 0.000001
+    ov2_thre = 1e-6
+    σ_inc = 5 # The factor by which the variance threshold is increased if no scars are found in a given iteration, to allow for finding scars with higher variance that may be missed with a too strict threshold. Can be adjusted based on the expected variance of the scar states.
+    #ov2_dec = 10 # The factor by which the overlap threshold is decreased if no scars are found in a given iteration, to allow for finding scars with lower overlap that may be missed with a too strict threshold. Can be adjusted based on the expected overlap of the scar states.
+
+    mkpath(folder) # Create folder if it doesn't exist
+
+    sites = siteinds("S=1/2", N; conserve_qns=false)
+ 
+    ψs = MPS[]
+    Es = Float64[]
+
+    if prevRuns
+        println("Loading scars from previous runs in folder $folder...")
+        uniformSites(sites, ψs, Es, folder; fname)
+        perm = sortperm(Es)
+        ψs = ψs[perm]
+        Es = Es[perm]
+    end
+
+    println("Building Hamiltonian and operators...")
+
+    H, H2, Id, PZ2 = buildOperators(sites; maxD = maxD, cut = cut)
+
+    Etarg = range(E_min, E_max, length=n_targ)
+
+    @printf("Target energies: %s\n", string(Etarg))
+
+    
+    println(siteinds(ψs[1]))
+    println("Curent site indices: ", sites)
+      
+    Id = IdOp(sites)
+    H = PXP_Hamiltonian(sites)
+    H2 = apply(H, H; maxdim = maxD, cutoff = cut)
+    PZ2 = Z2proj(sites)
+
+    sweeps_WUp = Sweeps(5)
+    maxdim!(sweeps_WUp, 10, 30, 80, 150, maxD)
+    cutoff!(sweeps_WUp, 1e-8)
+    noise!(sweeps_WUp, 1e-5, 1e-6, 1e-7, 1e-8, 0.0)
+
+    println("Starting scar search with VQE optimization... (a=%.2f, b=%.2f, c=%.2f)\n", a, b, c)
+    println("First sweep, may miss some scars")
+
+    for (k, E_target) in enumerate(Etarg)
+
+        println("Running WUp for target energy $E_target...")
+        # Warmup in shifted spectrum
+        H2_shift = apply(H - E_target*Id, H - E_target*Id; maxdim = maxD, cutoff = cut)
+        ψ0 = Z2state(sites)
+
+        if isempty(ψs)
+            _, ψ = dmrg(H2_shift, ψ0, sweeps_WUp; outputlevel = 0)
+        else
+            _, ψ = dmrg(H2_shift, ψs, ψ0, sweeps_WUp; weight = weight, outputlevel = 0)
+        end
+
+        # Main optimization
+        ψ = restrictHS(ψ, sites, maxD)
+
+        ψ = minimize(H, H2, PZ2, ψs, ψ, E_target, a, b,c; maxD = maxD, 
+                    n_iter = n_iter, n_sweeps = 15, weight = weight, tol = 1e-14,
+                    σ_thre = σ_thre, ov2_thre = ov2_thre)
+        E_found = inner(ψ', H, ψ)
+
+        C_found, _, var, _, ov2 = cost_3p(ψ, H, H2, PZ2, E_target, a, b, c)
+        
+        @printf("E_target = %.2f, E_found = %.2f, var = %.2e, C_found = %.2e\n", E_target, E_found, var, C_found)
+        
+        if any(abs(E_found - Ep) < ΔEmin for Ep in Es)
+            @printf("State too close to previously found state, skipping.\n")
+            continue
+        end
+
+        if isScar(ψ, H, PZ2, sites; σ_tol = σ_thre, otol = ov2_thre)
+            @printf("  ✓ Scar: E=%+.6f  Var=%.2e\n", E_found, var)
+            push!(ψs, ψ)
+            push!(Es, E_found)
+            h5open("$folder/N$(N)_$(idx).h5", "w") do f
+                write(f, "ψ", ψ)
+                write(f, "energy",   E_found)
+                write(f, "variance", var)
+                write(f, "ov2_Z2", ov2)
+            end
+            idx += 1
+        else
+            @printf("  ✗ Not a scar: E=%+.6f  Var=%.2e\n", E_found, var)
+        end
+    end
+
+    if isempty(ψs)
+        @printf("No scars found in the specified energy range.\n")
+        return MPS[], Float64[]
+    else
+        @printf("Found %d scar states in total.\n", length(ψs))
+    end
+
+    perm = sortperm(Es)
+    ψs = ψs[perm]
+    Es = Es[perm]
+    n_targ = 10
+    while true
+        targ_miss = checkMissing(Es; tolerance = 1.5, ω=1.33)
+        if targ_miss > 0
+            σ_thre *= σ_inc
+
+            Etarg2 = range(Es[targ_miss] + ΔEmin, Es[targ_miss+1] - ΔEmin, length=n_targ)
+            @printf("Refining search between E=%.2f and E=%.2f with relaxed thresholds (σ_thre=%.2e, ov2_thre=%.2e)...\n", 
+                    Es[targ_miss], Es[targ_miss+1], σ_thre, ov2_thre)
+
+            for E_target in Etarg2
+                ψ0 = Z2state(sites)
+                H2_shift = apply(H - E_target*Id, H - E_target*Id; maxdim = maxD, cutoff = cut)
+            
+                _, ψ = dmrg(H2_shift, ψs, ψ0, sweeps_WUp; weight = weight, outputlevel = 0)
+                ψ = restrictHS(ψ, sites, maxD)
+                ψ = minimize(H, H2, PZ2, ψs, ψ, E_target, a, b,c; maxD = maxD, 
+                            n_iter = n_iter, n_sweeps = 15, weight = weight, tol = 1e-14,
+                            σ_thre = σ_thre, ov2_thre = ov2_thre)
+                E_found = inner(ψ', H, ψ)
+
+                C_found, _, var, _, ov2 = cost_3p(ψ, H, H2, PZ2, E_target, a, b, c)
+                @printf("E_target = %.2f, E_found = %.2f, var = %.2e, C_found = %.2e\n", E_target, E_found, var, C_found)
+
+                if any(abs(E_found - Ep) < ΔEmin for Ep in Es)
+                    @printf("State too close to previously found state, skipping.\n")
+                    continue
+                end
+
+                if isScar(ψ, H, PZ2, sites; σ_tol = σ_thre, otol = ov2_thre)
+                    @printf("  ✓ Scar: E=%+.6f  Var=%.2e\n", E_found, var)
+                    push!(ψs, ψ)
+                    push!(Es, E_found)
+                    h5open("$folder/N$(N)_$(idx).h5", "w") do f
+                        write(f, "ψ", ψ)
+                        write(f, "energy",   E_found)
+                        write(f, "variance", var)
+                        write(f, "ov2_Z2", ov2)
+                    end
+                    idx += 1
+                else
+                    @printf("  ✗ Not a scar: E=%+.6f  Var=%.2e\n", E_found, var)
+                end
+
+                perm = sortperm(Es)
+                ψs = ψs[perm]
+                Es = Es[perm]
+            end
+        elseif targ_miss == 0
+            @printf("No large gaps detected in the found scar energies.\n")
+            break
+        elseif targ_miss == -1
+            @printf("Not enough energies to check for missing states.\n")
+            return MPS[], Float64[]
+        end
+    end
+
+    return ψs, Es
+
 end
