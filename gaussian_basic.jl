@@ -22,8 +22,7 @@ function constrainedBasis(N::Int)
         end
         valid && push!(basis, state)
     end
-    index = Dict(state => i for (i, state) in enumerate(basis))
-    return basis, index
+    return basis
 end
 
 function apply_reversal!(ψ_out::AbstractVector, ψ_in::AbstractVector, L::Int)
@@ -62,7 +61,7 @@ function pfaffian(M::Matrix{Float64})
         end
  
         pivot = A[k, k+1]
-        abs(pivot) < 1e-14 && continue   # zero block, contributes 0 to Pf
+        abs(pivot) < 1e-14 && return 0.0 # Numerical instability, treat as zero
         pf *= pivot
  
         # Schur complement update
@@ -75,9 +74,7 @@ end
 
 function build_bdg_state(U::Matrix{Float64}, V::Matrix{Float64}, L::Int)
     dim = 2^L
-    ϵ = 1e-12 
-    Z = V / (U + ϵ * I)
-    Z = 0.5 * (Z - Z') # Ensure strict antisymmetry
+    Z = V * pinv(U)
     ψ = zeros(Float64, dim)
 
     @threads for i in 0:(dim-1)
@@ -105,10 +102,16 @@ function bdg_GS(A::Matrix{Float64}, B::Matrix{Float64}, L::Int)
     M = [A B; -B -A]
     vals, vecs = eigen(Matrix(M))
     vals = real.(vals); vecs = real.(vecs)
-    ord = sortperm(vals)
-    occ = ord[1:L]
+    occ = findall(vals .< 0)
+    length(occ) != L && error("Expected exactly L negative eigenvalues, got ", length(occ))
     U = vecs[1:L, occ]
     V = vecs[L+1:2L, occ]
+
+    for i in 1:L
+        nrm = sqrt(norm(U[:,i])^2 + norm(V[:,i])^2)
+        U[:,i] /= nrm
+        V[:,i] /= nrm
+    end
 
     return build_bdg_state(U, V, L)
 end
@@ -171,7 +174,8 @@ function cost_function(params::Vector, L::Int, ψ_scar::Vector, sector_sign::Flo
     ψ_sym = symmetrize_state(ψ0, L, sector_sign)
     ψ_proj = parity_project(ψ_sym, parity, L) # Project onto even parity sector
     n = norm(ψ_proj)
-    n < 1e-14 && (println("Olap = 0.0"); return 0.0)
+    n < 1e-14 && (println("Olap = 0.0"); return 1e6)
+    ψ_proj ./= n
     olap = abs(dot(ψ_scar, ψ_proj))^2
     println("Overlap with scar: ", olap)
     return -olap
@@ -223,15 +227,15 @@ function main()
     idx =  7 + floor(Int, E_targ)
     folder = "dataN$(L)"
     file = "$(folder)/scar_$(idx)_E$(floor(Int, E_targ)).jld2"
-    # sector_sign = 1.0
-    # parity_sector = 1
+    sector_sign = 1.0
+    parity_sector = 1
     ψ = jldopen(file, "r") do f
         read(f, "state")
     end
-    Pψ  = similar(ψ); apply_reversal!(Pψ, ψ, L)
-    sector_sign   = real(dot(ψ, Pψ)) > 0 ? 1.0 : -1.0
-    parity_sector = (L % 4 == 0) ? 1 : -1
-    flip    = (parity_sector == -1)
+    # Pψ  = similar(ψ); apply_reversal!(Pψ, ψ, L)
+    # sector_sign   = real(dot(ψ, Pψ)) > 0 ? 1.0 : -1.0
+    # parity_sector = (L % 4 == 0) ? 1 : -1
+    flip    = (parity_sector == 1)
     println("Loaded scar state from ", file, " with size: ", length(ψ))
     println("E = ", E_targ, " | Sector sign: ", sector_sign, " | Parity sector: ", parity_sector)
     A_opt, B_opt, ψ_opt, olap_final = optimize_gaussian(ψ, L, E_targ; 
