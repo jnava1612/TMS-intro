@@ -5,6 +5,7 @@ using Base.Threads
 using Printf
 using Optim
 using JLD2
+using CairoMakie
 
 const Id2 = sparse(I, 2, 2)
 const c = sparse([0 1; 0 0]) # fermionic annihilation operator
@@ -136,6 +137,24 @@ function parity_project(ψ::Vector, sector::Int, L::Int)
     return ψ_proj
 end
 
+function parity_project(ψ, basis)
+    ψ_plus  = similar(ψ)
+    ψ_minus = similar(ψ)
+
+    for (i, state) in enumerate(basis)
+        parity = iseven(count_ones(state)) ? 1.0 : -1.0
+
+        ψ_plus[i]  = 0.5 * (1 + parity) * ψ[i]
+        ψ_minus[i] = 0.5 * (1 - parity) * ψ[i]
+    end
+
+    # normalize safely
+    ψ_plus  /= max(norm(ψ_plus), 1e-12)
+    ψ_minus /= max(norm(ψ_minus), 1e-12)
+
+    return ψ_plus, ψ_minus
+end
+
 function pack_params(A, B, L::Int)
     params = Float64[]
     for i in 1:L, j in i:L;     push!(params, A[i, j]); end
@@ -166,7 +185,7 @@ function initial_params(L::Int, flip::Bool = false)
     return Diagonal(diag_A) |> Matrix, B
 end
 
-function cost_function(params::Vector, L::Int, ψ_scar::Vector, sector_sign::Float64, parity::Int, E_target::Float64; λ = 0.0)
+function cost_function(params::Vector, L::Int, ψ_scar::Vector, sector_sign::Float64, parity::Int, E_target::Float64; λ = 0.0, basis = nothing, H = nothing)
 
     A, B = unpack_params(params, L)
 
@@ -177,26 +196,36 @@ function cost_function(params::Vector, L::Int, ψ_scar::Vector, sector_sign::Flo
     n < 1e-14 && (println("Olap = 0.0"); return 1e6)
     ψ_proj ./= n
     olap = abs(dot(ψ_scar, ψ_proj))^2
-    println("Overlap with scar: ", olap)
-    return -olap
+    var = 0.0
+    if !isnothing(basis) && !isnothing(H)
+        ψ_red = project(ψ_proj, basis)
+        E_current = real(dot(ψ_red, H * ψ_red))
+        var = (E_current - E_target)^2
+        println("Overlap with scar: ", olap, " | Energy: ", E_current, " (target: ", E_target, ")")
+    else
+        println("Overlap with scar: ", olap, "(E_target: ", E_target," ", sector_sign == 1.0 ? "even" : "odd", " parity)")
+    end
+    return -olap + λ * var
 end
 
 function optimize_gaussian(ψ_scar::Vector, L::Int, E_target::Float64;
                            sector_sign::Float64 = 1.0,
                            parity_sector::Int   = 1,
                            λ::Float64           = 0.0,
-                           flip::Bool           = false,
-                           max_nm::Int          = 10000,
-                           max_lbfgs::Int       = 20000)
+                           basis = nothing,
+                           H = nothing,
+                           max_nm::Int          = 500,
+                           max_lbfgs::Int       = 1000)
 
     ψ_scar_proj = parity_project(ψ_scar, parity_sector, L)
+    flip = (parity_sector == 1)
     proj_norm = norm(ψ_scar_proj)
     @printf("  ‖P̂_%+d |ψ_scar⟩‖ = %.6f  (expect ≈ 0.707)\n", parity_sector, proj_norm)
     ψ_scar_proj ./= proj_norm
 
     A0, B0 = initial_params(L, flip)
     params0 = pack_params(A0, B0, L)
-    obj(p) = cost_function(p, L, ψ_scar_proj, sector_sign, parity_sector, E_target; λ = λ)
+    obj(p) = cost_function(p, L, ψ_scar_proj, sector_sign, parity_sector, E_target; λ = λ, basis = basis, H = H)
 
     res1 = optimize(obj, params0, NelderMead(), 
                     Optim.Options(iterations = max_nm, show_trace = true))
@@ -221,30 +250,133 @@ function optimize_gaussian(ψ_scar::Vector, L::Int, E_target::Float64;
     return A_opt, B_opt, ψ_opt_proj, olap_final
 end
 
+function build_pxp_hamiltonian(L::Int)
+    rows = Int[]
+    cols = Int[]
+    vals = Float64[]
+
+    basis = constrainedBasis(L)
+    dim = length(basis)
+
+    index = Dict(basis[i] => i for i in 1:dim)
+    for (i, state) in enumerate(basis)
+        for j in 0:(L-1)
+            left  = mod(j-1, L)
+            right = mod(j+1, L)
+            if ((state >> left) & 1 == 0) && ((state >> right) & 1 == 0)
+                new_state = state ⊻ (1 << j)
+                if haskey(index, new_state)
+                    push!(rows, index[new_state])
+                    push!(cols, i)
+                    push!(vals, 1.0)
+                end
+            end
+        end
+    end
+    return sparse(rows, cols, vals, dim, dim), basis
+end
+
+function entropy(ψ, basis, L)
+    Nhalf = L ÷ 2
+    dimL = 2^Nhalf
+    dimR = 2^(L - Nhalf)
+
+    ψ_full = zeros(Float64, 2^L)
+
+    # embed into full space
+    for (i, state) in enumerate(basis)
+        ψ_full[state+1] = ψ[i]
+    end
+
+    ψ_mat = reshape(ψ_full, dimL, dimR)
+
+    s = svdvals(ψ_mat)
+    p = s.^2
+    return -sum(p .* log.(p .+ 1e-12))
+end
+ 
+function scar_tower(L::Int; z2_threshold::Float64=1e-5, ent_threshold::Float64=0.31)
+    S_vol = L * log(2) / 2
+    H, basis  = build_pxp_hamiltonian(L)
+    Z2_i = sum(1 << i for i in 0:2:(L-1))
+    Z2 = zeros(Float64, length(basis))
+
+    for (i, state) in enumerate(basis)
+        if state == Z2_i
+            Z2[i] = 1.0
+        end
+    end
+    E, V      = eigen(Matrix(H))
+    olaps = [abs(dot(Z2, V[:,k]))^2 for k in 1:length(E)]
+    entropies = [entropy(V[:,k], basis, L) for k in 1:length(E)]
+    scar_idx  = [k for k in eachindex(E) if olaps[k] > z2_threshold && entropies[k] < ent_threshold*S_vol && E[k] > 0.0]
+    println("Identified scar states at indices: ", scar_idx)
+    E = E[scar_idx]
+    V = V[:, scar_idx]
+    entropies = entropies[scar_idx]
+    olaps = olaps[scar_idx]
+    perm = sortperm(E)
+    return E[perm], V[:, perm]
+end
+
+function embed(ψ_restricted::Vector, basis::Vector{Int}, L::Int)
+    dim = 2^L
+    ψ_full = zeros(Float64, dim)
+    for (i, state) in enumerate(basis)
+        ψ_full[state+1] = ψ_restricted[i]
+    end
+    return ψ_full./ norm(ψ_full)
+end
+
+function project(ψ_full::Vector, basis::Vector{Int})
+    ψ_proj = similar(basis, Float64)
+    for (i, state) in enumerate(basis)
+        ψ_proj[i] = ψ_full[state + 1]
+    end
+    return ψ_proj./ norm(ψ_proj)
+end
+
 function main()
     L = 14
-    E_targ = 1.33
-    idx =  7 + floor(Int, E_targ)
     folder = "dataN$(L)"
-    file = "$(folder)/scar_$(idx)_E$(floor(Int, E_targ)).jld2"
-    sector_sign = 1.0
-    parity_sector = 1
-    ψ = jldopen(file, "r") do f
-        read(f, "state")
-    end
-    # Pψ  = similar(ψ); apply_reversal!(Pψ, ψ, L)
-    # sector_sign   = real(dot(ψ, Pψ)) > 0 ? 1.0 : -1.0
-    # parity_sector = (L % 4 == 0) ? 1 : -1
-    flip    = (parity_sector == 1)
-    println("Loaded scar state from ", file, " with size: ", length(ψ))
-    println("E = ", E_targ, " | Sector sign: ", sector_sign, " | Parity sector: ", parity_sector)
-    A_opt, B_opt, ψ_opt, olap_final = optimize_gaussian(ψ, L, E_targ; 
-                                                        sector_sign = sector_sign, 
-                                                        parity_sector = parity_sector, 
-                                                        λ = 0.0, 
-                                                        flip = flip)
+    mkpath(folder)
+    λ = 0.01
+    E, V = scar_tower(L; z2_threshold=1e-5, ent_threshold=0.31)
+    H, basis = build_pxp_hamiltonian(L)
+    H, basis = nothing, nothing # Free up memory
+    for (i, E_targ) in enumerate(E)
+        ψ = V[:, i]
+        ψ_full = embed(ψ, constrainedBasis(L), L)
+        ψ_plus, ψ_minus = parity_project(ψ_full, constrainedBasis(L))
 
-    println("Final overlap with scar: ", olap_final)
-    jldsave("$(folder)/gaussian_N$(L)_E$(floor(Int, E_targ)).jld2"; A=A_opt, B=B_opt, ψ_opt=ψ_opt)
-    return A_opt, B_opt, ψ_opt, olap_final
+        A_p, B_p, ψ_p, olap_p = optimize_gaussian(ψ_plus, L, E_targ; 
+                                                  sector_sign=1.0, parity_sector=1,
+                                                  basis = basis, H = H, λ = λ)
+
+        println("Optimized overlap for parity-even sector: ", olap_p)
+        #sleep(10)
+
+        jldsave("$(folder)/scar_$(i)_even.jld2"; A=A_p, B=B_p, ψ=ψ_p, overlap=olap_p)
+
+        A_m, B_m, ψ_m, olap_m = optimize_gaussian(ψ_minus, L, E_targ; 
+                                                  sector_sign=-1.0, parity_sector=-1,
+                                                  basis = basis, H = H, λ = λ)
+        println("Optimized overlap for parity-odd sector: ", olap_m)
+        #sleep(10)
+
+        jldsave("$(folder)/scar_$(i)_odd.jld2"; A=A_m, B=B_m, ψ=ψ_m, overlap=olap_m)
+
+    end
+    println("All optimizations completed.")
 end
+
+
+function get_scars()
+    L = 14
+    E, V, entropies, olaps = scar_tower(L; z2_threshold=1e-5, ent_threshold=0.31)
+    fig  = Figure(size=(800, 600))
+    ax = Axis(fig[1, 1], xlabel=L"E/N", ylabel = L"\log_{10} |\langle Z_2 | \Psi_n \rangle|^2")
+    scatter!(ax, E, log10.(olaps), color=:blue, markersize=8)
+    display(fig)
+end
+
