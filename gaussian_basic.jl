@@ -26,20 +26,29 @@ function constrainedBasis(N::Int)
     return basis
 end
 
-function apply_reversal!(ψ_out::AbstractVector, ψ_in::AbstractVector, L::Int)
-    dim = length(ψ_in)
-
-    Threads.@threads for i in 0:(dim-1)
+function build_reversal_map(L::Int)
+    dim = 2^L
+    map = Vector{Int}(undef, dim)
+    for i in 0:(dim - 1)
         rev_i = 0
-        for j in 0:(L-1)
+        for j in 0:(L - 1)
             if (i >> j) & 1 == 1
                 rev_i |= (1 << (L - 1 - j))
             end
         end
-        
-        @inbounds ψ_out[rev_i + 1] = ψ_in[i + 1]
+        map[i + 1] = rev_i + 1
+    end
+    return map
+end
+
+function apply_reversal!(ψ_out::AbstractVector, ψ_in::AbstractVector, reversal_map::Vector{Int})
+    @assert length(ψ_out) == length(ψ_in) == length(reversal_map)
+    fill!(ψ_out, 0.0)  # safety
+    @inbounds for i in eachindex(ψ_in)
+        ψ_out[reversal_map[i]] = ψ_in[i]
     end
 end
+
 
 function pfaffian(M::Matrix{Float64})
     n = size(M, 1)
@@ -117,42 +126,17 @@ function bdg_GS(A::Matrix{Float64}, B::Matrix{Float64}, L::Int)
     return build_bdg_state(U, V, L)
 end
 
-function symmetrize_state(ψ0::Vector{Float64}, L::Int, sector_sign::Float64)
+function symmetrize_state(ψ0::Vector{Float64}, L::Int, reversal_map::Vector{Int})
     Pψ0 = similar(ψ0)
-    apply_reversal!(Pψ0, ψ0, L)
+    apply_reversal!(Pψ0, ψ0, reversal_map)
 
-    ψ = ψ0 + sector_sign * Pψ0
-    n = norm(ψ)
-    n < 1e-14 && error("Norm is too small after symmetrization, likely due to destructive interference.")
-    return ψ ./ n
-end
-
-function parity_project(ψ::Vector, sector::Int, L::Int)
-    dim = length(ψ)
-    ψ_proj = similar(ψ, Float64)
-    @threads for i in 0:(dim-1)
-        parity_val = iseven(count_ones(i)) ? 1.0 : -1.0
-        @inbounds ψ_proj[i+1] = 0.5 * (1.0 + sector * parity_val) * ψ[i+1]
-    end
-    return ψ_proj
-end
-
-function parity_project(ψ, basis)
-    ψ_plus  = similar(ψ)
-    ψ_minus = similar(ψ)
-
-    for (i, state) in enumerate(basis)
-        parity = iseven(count_ones(state)) ? 1.0 : -1.0
-
-        ψ_plus[i]  = 0.5 * (1 + parity) * ψ[i]
-        ψ_minus[i] = 0.5 * (1 - parity) * ψ[i]
+    if norm(ψ0 + Pψ0) < 1e-14
+        ψ = ψ0 - Pψ0
+    elseif norm(ψ0 - Pψ0) < 1e-14
+        ψ = ψ0 + Pψ0
     end
 
-    # normalize safely
-    ψ_plus  /= max(norm(ψ_plus), 1e-12)
-    ψ_minus /= max(norm(ψ_minus), 1e-12)
-
-    return ψ_plus, ψ_minus
+    return ψ ./ norm(ψ)
 end
 
 function pack_params(A, B, L::Int)
@@ -198,7 +182,7 @@ function cost_function(params::Vector, L::Int, ψ_scar::Vector, sector_sign::Flo
     olap = abs(dot(ψ_scar, ψ_proj))^2
     var = 0.0
     if !isnothing(basis) && !isnothing(H)
-        ψ_red = project(ψ_proj, basis)
+        ψ_red = project_to_fib(ψ_proj, basis)
         E_current = real(dot(ψ_red, H * ψ_red))
         var = (E_current - E_target)^2
         println("Overlap with scar: ", olap, " | Energy: ", E_current, " (target: ", E_target, ")")
@@ -217,15 +201,12 @@ function optimize_gaussian(ψ_scar::Vector, L::Int, E_target::Float64;
                            max_nm::Int          = 500,
                            max_lbfgs::Int       = 1000)
 
-    ψ_scar_proj = parity_project(ψ_scar, parity_sector, L)
     flip = (parity_sector == 1)
-    proj_norm = norm(ψ_scar_proj)
-    @printf("  ‖P̂_%+d |ψ_scar⟩‖ = %.6f  (expect ≈ 0.707)\n", parity_sector, proj_norm)
-    ψ_scar_proj ./= proj_norm
 
     A0, B0 = initial_params(L, flip)
     params0 = pack_params(A0, B0, L)
-    obj(p) = cost_function(p, L, ψ_scar_proj, sector_sign, parity_sector, E_target; λ = λ, basis = basis, H = H)
+    
+    obj(p) = cost_function(p, L, ψ_scar, sector_sign, parity_sector, E_target; λ = λ, basis = basis, H = H)
 
     res1 = optimize(obj, params0, NelderMead(), 
                     Optim.Options(iterations = max_nm, show_trace = true))
@@ -319,7 +300,7 @@ function scar_tower(L::Int; z2_threshold::Float64=1e-5, ent_threshold::Float64=0
     return E[perm], V[:, perm]
 end
 
-function embed(ψ_restricted::Vector, basis::Vector{Int}, L::Int)
+function embed_to_full(ψ_restricted::Vector, basis::Vector{Int}, L::Int)
     dim = 2^L
     ψ_full = zeros(Float64, dim)
     for (i, state) in enumerate(basis)
@@ -328,7 +309,7 @@ function embed(ψ_restricted::Vector, basis::Vector{Int}, L::Int)
     return ψ_full./ norm(ψ_full)
 end
 
-function project(ψ_full::Vector, basis::Vector{Int})
+function project_to_fib(ψ_full::Vector, basis::Vector{Int})
     ψ_proj = similar(basis, Float64)
     for (i, state) in enumerate(basis)
         ψ_proj[i] = ψ_full[state + 1]
@@ -336,19 +317,53 @@ function project(ψ_full::Vector, basis::Vector{Int})
     return ψ_proj./ norm(ψ_proj)
 end
 
+function create_projectors(basis::Vector{Int}, L::Int)
+    sigma_z = sparse([1 0; 0 -1])
+    chiral = sigma_z
+    for j in 2:L
+        chiral = kron(sigma_z, chiral)
+    end
+    
+    values, vectors = eigen(Matrix(chiral))
+    
+    positive_vectors = [vectors[:,i] for i in 1:length(values) if values[i]>0.0]
+    negative_vectors = [vectors[:,i] for i in 1:length(values) if values[i]<0.0]
+
+    P_plus = spzeros(Float64, size(basis, 1), size(basis, 1))
+    for i in eachindex(positive_vectors)
+        vector_projected = sparse(project_to_fib(positive_vectors[i], basis))
+        if !isnan(vector_projected[1])
+            P_plus += kron(vector_projected', vector_projected)
+        end
+    end
+
+    P_minus = spzeros(Float64, size(basis, 1), size(basis, 1))
+    for i in eachindex(negative_vectors)
+        vector_projected = sparse(project_to_fib(negative_vectors[i], basis))
+        if !isnan(vector_projected[1])
+            P_minus += kron(vector_projected', vector_projected)
+        end
+    end
+    return P_plus, P_minus
+end
+
 function main()
     L = 14
     folder = "dataN$(L)"
     mkpath(folder)
-    λ = 0.01
+    λ = 0.0
     E, V = scar_tower(L; z2_threshold=1e-5, ent_threshold=0.31)
     H, basis = build_pxp_hamiltonian(L)
-    H, basis = nothing, nothing # Free up memory
+    P_plus, P_minus = create_projectors(basis, L)
+
     for (i, E_targ) in enumerate(E)
         ψ = V[:, i]
-        ψ_full = embed(ψ, constrainedBasis(L), L)
-        ψ_plus, ψ_minus = parity_project(ψ_full, constrainedBasis(L))
+        ψ_plus = P_plus * ψ
+        ψ_minus = P_minus * ψ
 
+        ψ_plus_emb = embed_to_full(ψ_plus, basis, L)
+        ψ_minus_emb = embed_to_full(ψ_minus, basis, L)
+        
         A_p, B_p, ψ_p, olap_p = optimize_gaussian(ψ_plus, L, E_targ; 
                                                   sector_sign=1.0, parity_sector=1,
                                                   basis = basis, H = H, λ = λ)
