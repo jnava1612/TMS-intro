@@ -287,6 +287,7 @@ function cost_function(params::Vector, L::Int, ψ_scar::Vector, reversal_map::Ve
     else
         println("Overlap with scar: ", olap, "(E_target: ", E_target, ")")
     end
+    println("Overlap with scar: ", olap, "(E_target: ", E_target, ")")
 
     return -olap + λ * var
 end
@@ -420,7 +421,7 @@ function main()
         ψ_plus_emb = embed_to_full(ψ_plus, basis, L)
         ψ_minus_emb = embed_to_full(ψ_minus, basis, L)
         
-        A_p, B_p, ψ_p, olap_p = optimize_gaussian(ψ_plus, L, E_targ, reversal_map;
+        A_p, B_p, ψ_p, olap_p = optimize_gaussian(ψ_plus_emb, L, E_targ, reversal_map;
                                                   basis = basis, H = H, λ = λ, 
                                                   flip_first = flip_first,
                                                   max_nm = max_nm, max_lbfgs = max_lbfgs)
@@ -429,7 +430,7 @@ function main()
 
         jldsave("$(folder)/scar_$(i)_even.jld2"; A=A_p, B=B_p, ψ=ψ_p, overlap=olap_p)
 
-        A_m, B_m, ψ_m, olap_m = optimize_gaussian(ψ_minus, L, E_targ, reversal_map;
+        A_m, B_m, ψ_m, olap_m = optimize_gaussian(ψ_minus_emb, L, E_targ, reversal_map;
                                                   basis = basis, H = H, λ = λ, 
                                                   flip_first = flip_first,
                                                   max_nm = max_nm, max_lbfgs = max_lbfgs)
@@ -438,6 +439,8 @@ function main()
         jldsave("$(folder)/scar_$(i)_odd.jld2"; A=A_m, B=B_m, ψ=ψ_m, overlap=olap_m)
 
     end
-    
+
     println("All optimizations completed.")
 end
+
+main()
