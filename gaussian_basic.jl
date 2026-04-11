@@ -111,7 +111,7 @@ function build_projectors(basis::Vector{Int}, L::Int)
     for i in eachindex(positive_vectors)
         vector_projected = sparse(project_to_fib(positive_vectors[i], basis))
         if !isnan(vector_projected[1])
-            P_plus += kron(vector_projected', vector_projected)
+            P_plus += vector_projected * vector_projected'
         end
     end
 
@@ -119,7 +119,7 @@ function build_projectors(basis::Vector{Int}, L::Int)
     for i in eachindex(negative_vectors)
         vector_projected = sparse(project_to_fib(negative_vectors[i], basis))
         if !isnan(vector_projected[1])
-            P_minus += kron(vector_projected', vector_projected)
+            P_minus += vector_projected * vector_projected'
         end
     end
     return P_plus, P_minus
@@ -130,7 +130,7 @@ end
 # State Modifier Functions
 #==========================================================================================#
 
-function apply_reversal!(ψ_out::AbstractVector, ψ_in::AbstractVector, reversal_map::Vector{Int})
+function apply_spatial_inversion!(ψ_out::AbstractVector, ψ_in::AbstractVector, reversal_map::Vector{Int})
     @assert length(ψ_out) == length(ψ_in) == length(reversal_map)
     fill!(ψ_out, 0.0)  # safety
     @inbounds for i in eachindex(ψ_in)
@@ -138,16 +138,10 @@ function apply_reversal!(ψ_out::AbstractVector, ψ_in::AbstractVector, reversal
     end
 end
 
-function symmetrize_state(ψ0::Vector{Float64}, L::Int, reversal_map::Vector{Int})
-    Pψ0 = similar(ψ0)
-    apply_reversal!(Pψ0, ψ0, reversal_map)
-
-    if norm(ψ0 + Pψ0) < 1e-14
-        ψ = ψ0 - Pψ0
-    else norm(ψ0 - Pψ0) < 1e-14
-        ψ = ψ0 + Pψ0
-    end
-
+function symmetrize_state(ψ0::Vector{Float64}, L::Int, reversal_map::Vector{Int}, sign::Float64)
+    πψ0 = similar(ψ0)
+    apply_spatial_inversion!(πψ0, ψ0, reversal_map)
+    ψ = ψ0 + sign * πψ0
     return ψ ./ norm(ψ)
 end
 
@@ -157,7 +151,7 @@ function embed_to_full(ψ_restricted::Vector, basis::Vector{Int}, L::Int)
     for (i, state) in enumerate(basis)
         ψ_full[state+1] = ψ_restricted[i]
     end
-    return ψ_full./ norm(ψ_full)
+    return ψ_full
 end
 
 function project_to_fib(ψ_full::Vector, basis::Vector{Int})
@@ -165,7 +159,7 @@ function project_to_fib(ψ_full::Vector, basis::Vector{Int})
     for (i, state) in enumerate(basis)
         ψ_proj[i] = ψ_full[state + 1]
     end
-    return ψ_proj./ norm(ψ_proj)
+    return ψ_proj
 end
 
 
@@ -262,19 +256,19 @@ function initial_params(L::Int, flip::Bool = false)
     return Diagonal(diag_A) |> Matrix, B
 end
 
-function cost_function(params::Vector, L::Int, ψ_scar::Vector, reversal_map::Vector{Int}, E_target::Float64; 
+function cost_function(params::Vector, L::Int, ψ_scar::Vector, reversal_map::Vector{Int}, E_target::Float64, sign::Float64; 
                        λ::Float64 = 0.0, basis = nothing, H = nothing)
 
     A, B = unpack_params(params, L)
 
     ψ0 = bdg_GS(A, B, L)
     
-    ψ_sym = symmetrize_state(ψ0, L, reversal_map)
+    ψ_sym = symmetrize_state(ψ0, L, reversal_map, sign)
     
     olap = 4 * abs(dot(ψ_scar, ψ_sym))^2
     if olap < 1e-14
         println("Overlap is very small: ", olap)
-        return 1e6  # Large penalty for zero overlap
+        return 0.0  # Large penalty for zero overlap
     end
     var = 0.0
     if !isnothing(basis) && !isnothing(H) && λ > 0.0
@@ -287,12 +281,11 @@ function cost_function(params::Vector, L::Int, ψ_scar::Vector, reversal_map::Ve
     else
         println("Overlap with scar: ", olap, "(E_target: ", E_target, ")")
     end
-    println("Overlap with scar: ", olap, "(E_target: ", E_target, ")")
 
     return -olap + λ * var
 end
 
-function optimize_gaussian(ψ_scar::Vector, L::Int, E_target::Float64, reversal_map::Vector{Int};
+function optimize_gaussian(ψ_scar::Vector, L::Int, E_target::Float64, reversal_map::Vector{Int}, sign::Float64;
                            λ::Float64           = 0.0,
                            basis = nothing,
                            H = nothing,
@@ -303,7 +296,7 @@ function optimize_gaussian(ψ_scar::Vector, L::Int, E_target::Float64, reversal_
     A0, B0 = initial_params(L, flip_first)
     params0 = pack_params(A0, B0, L)
     
-    obj(p) = cost_function(p, L, ψ_scar, reversal_map, E_target; λ = λ, basis = basis, H = H)
+    obj(p) = cost_function(p, L, ψ_scar, reversal_map, E_target, sign; λ = λ, basis = basis, H = H)
 
     res1 = optimize(obj, params0, NelderMead(), 
                     Optim.Options(iterations = max_nm, show_trace = true))
@@ -311,9 +304,9 @@ function optimize_gaussian(ψ_scar::Vector, L::Int, E_target::Float64, reversal_
     println("Nelder-Mead result: ", res1)
     
     res2 = optimize(obj, res1.minimizer, LBFGS(), 
-                    Optim.Options(g_tol = 1e-20, 
-                                  x_abstol = 1e-12, 
-                                  f_abstol = 1e-12, 
+                    Optim.Options(g_tol = 1e-12, 
+                                  x_abstol = 1e-8, 
+                                  f_abstol = 1e-8, 
                                   iterations = max_lbfgs, 
                                   show_trace = true))
 
@@ -321,7 +314,7 @@ function optimize_gaussian(ψ_scar::Vector, L::Int, E_target::Float64, reversal_
 
     A_opt, B_opt = unpack_params(res2.minimizer, L)
     ψ_opt = bdg_GS(A_opt, B_opt, L)
-    ψ_opt_sym = symmetrize_state(ψ_opt, L, reversal_map)
+    ψ_opt_sym = symmetrize_state(ψ_opt, L, reversal_map, sign)
 
     olap_final = 4 * abs(dot(ψ_scar, ψ_opt_sym))^2
 
@@ -413,34 +406,56 @@ function main()
     P_plus, P_minus = build_projectors(basis, L)
     reversal_map = build_reversal_map(L)
 
+    olaps_plus = []
+    olaps_minus = []
+
     for (i, E_targ) in enumerate(E)
         ψ = V[:, i]
+
         ψ_plus = P_plus * ψ
         ψ_minus = P_minus * ψ
+        # println(dot(ψ, ψ_plus), " + ", dot(ψ, ψ_minus), " = ", dot(ψ, ψ))
+        # println(norm(ψ - ψ_plus - ψ_minus))
+        # println(norm(ψ_plus), norm(ψ_minus))
+        # sleep(10)
 
         ψ_plus_emb = embed_to_full(ψ_plus, basis, L)
         ψ_minus_emb = embed_to_full(ψ_minus, basis, L)
+
+        ψ_f = embed_to_full(ψ, basis, L)
+        πψ_f = similar(ψ_f)
+        apply_spatial_inversion!(πψ_f, ψ_f, reversal_map)
+
+        if norm(ψ_f + πψ_f) < 1e-14
+            sign = -1.0
+        else
+            sign = 1.0
+        end
         
-        A_p, B_p, ψ_p, olap_p = optimize_gaussian(ψ_plus_emb, L, E_targ, reversal_map;
+        A_p, B_p, ψ_p, olap_p = optimize_gaussian(ψ_plus_emb, L, E_targ, reversal_map, sign;
                                                   basis = basis, H = H, λ = λ, 
-                                                  flip_first = flip_first,
+                                                  flip_first = false,
                                                   max_nm = max_nm, max_lbfgs = max_lbfgs)
 
         println("Optimized overlap for parity-even sector: ", olap_p)
+        push!(olaps_plus, olap_p)
 
         jldsave("$(folder)/scar_$(i)_even.jld2"; A=A_p, B=B_p, ψ=ψ_p, overlap=olap_p)
 
-        A_m, B_m, ψ_m, olap_m = optimize_gaussian(ψ_minus_emb, L, E_targ, reversal_map;
+        A_m, B_m, ψ_m, olap_m = optimize_gaussian(ψ_minus_emb, L, E_targ, reversal_map, sign;
                                                   basis = basis, H = H, λ = λ, 
-                                                  flip_first = flip_first,
+                                                  flip_first = true,
                                                   max_nm = max_nm, max_lbfgs = max_lbfgs)
         println("Optimized overlap for parity-odd sector: ", olap_m)
+        push!(olaps_minus, olap_m)
 
         jldsave("$(folder)/scar_$(i)_odd.jld2"; A=A_m, B=B_m, ψ=ψ_m, overlap=olap_m)
 
     end
 
     println("All optimizations completed.")
+    println("Overlaps for parity-even sector: ", olaps_plus)
+    println("Overlaps for parity-odd sector: ", olaps_minus)
 end
 
-main()
+# main()
