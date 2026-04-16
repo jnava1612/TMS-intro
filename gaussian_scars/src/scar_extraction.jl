@@ -17,7 +17,8 @@ function entropy(ψ, basis, L)
     return -sum(p .* log.(p .+ 1e-12))
 end
 
-function scar_tower(L::Int; z2_threshold::Float64=1e-5, ent_threshold::Float64=0.31)
+function scar_tower(L::Int; z2_threshold::Float64=1e-5, ent_threshold::Float64=0.31, 
+                    save_data::Bool=false, path::String="")
     S_vol = L * log(2) / 2
     H, basis  = build_pxp_hamiltonian(L)
     
@@ -50,7 +51,16 @@ function scar_tower(L::Int; z2_threshold::Float64=1e-5, ent_threshold::Float64=0
     
     perm = sortperm(E)
 
-    return E[perm], V[:, perm], entropies[perm], olaps[perm]
+    E = E[perm]
+    V = V[:, perm]
+    entropies = entropies[perm]
+    olaps = olaps[perm]
+
+    if save_data
+        @save joinpath(path, "scar_data_L$(L).jld2") E V entropies olaps
+    end
+
+    return E, V, entropies, olaps
 end
 
 function view_scars(L::Int; z2_threshold=1e-5, ent_threshold=0.31)
