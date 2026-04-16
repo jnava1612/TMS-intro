@@ -1,4 +1,6 @@
 function apply_spatial_inversion!(ψ_out::AbstractVector, ψ_in::AbstractVector, reversal_map::Vector{Int})
+    # Given a state ψ_in defined in the full Hilbert space, applies spatial inversion to it and stores the result in ψ_out.
+    # A reversal_map is required so that the operation can be performed efficiently without constructing a full permutation matrix.
     @assert length(ψ_out) == length(ψ_in) == length(reversal_map)
     fill!(ψ_out, 0.0)  # safety
     @inbounds for i in eachindex(ψ_in)
@@ -7,6 +9,7 @@ function apply_spatial_inversion!(ψ_out::AbstractVector, ψ_in::AbstractVector,
 end
 
 function symmetrize_state(ψ0::AbstractVector, reversal_map::Vector{Int}, sign::Float64)
+    # Symmetrizes the state ψ0 under spatial inversion, with a given sign (±1).
     πψ0 = similar(ψ0)
     apply_spatial_inversion!(πψ0, ψ0, reversal_map)
     ψ = ψ0 + sign * πψ0
