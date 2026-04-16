@@ -1,9 +1,3 @@
-using LinearAlgebra
-using SparseArrays
-using Arpack
-using Base.Threads
-
-
 #==========================================================================================#
 # Fermionic operators and their application to states represented as UInt64 bitstrings.
 #==========================================================================================#
