@@ -23,6 +23,7 @@ Base.@kwdef struct PlotConfig
     z2_thresholds::Vector{Float64} = [1e-5, 1e-5, 1e-5, 1e-5]
     ent_thresholds::Vector{Float64} = [0.5, 0.4, 0.35, 0.31]
     output_dir::String = "data"
+    solver::GaussianSolver = FullMatrixSolver()
 end
 
 Base.@kwdef struct BenchmarkConfig
