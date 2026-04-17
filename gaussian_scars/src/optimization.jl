@@ -1,12 +1,3 @@
-abstract type GaussianSolver end
-
-struct FullMatrixSolver <: GaussianSolver end
-
-struct BitwiseSolver <: GaussianSolver
-    maxiter::Int
-    tol::Float64
-end
-
 function get_ground_state(solver::GaussianSolver, A, B, L; kwargs...)
     error("get_ground_state not implemented for $(typeof(solver))")
 end
@@ -101,12 +92,11 @@ function run_optimization(cfg)
     L = cfg.L
     λ = cfg.λ
     solver = cfg.solver
-    flip_first = cfg.flip_first
     max_nm = cfg.max_nm
     max_lbfgs = cfg.max_lbfgs
     z2_threshold = cfg.z2_threshold
     ent_threshold = cfg.ent_threshold
-    folder = cfg.folder
+    folder = cfg.output_dir
 
     z2_in_even = iseven(L ÷ 2)
 
