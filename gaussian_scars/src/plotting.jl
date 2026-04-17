@@ -8,7 +8,7 @@ function mytheme()
             #title = "Latin Modern Roman Bold",
             #ticks = "Latin Modern Roman",
         ),
-        fontsize = 36,
+        fontsize = 20,
         Axis = (
             # frame configuration
             spinewidth = 0.8,
@@ -55,3 +55,8 @@ function mytheme()
         ),
     ))
 end
+
+latex_ticks(vals; fmt = x -> string(x)) = (
+    collect(vals),
+    [L"%$(fmt(v))" for v in vals]
+)

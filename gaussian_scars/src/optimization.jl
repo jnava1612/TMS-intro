@@ -2,7 +2,7 @@ function get_ground_state(solver::GaussianSolver, A, B, L; kwargs...)
     error("get_ground_state not implemented for $(typeof(solver))")
 end
 
-function get_ground_state(::FullMatrixSolver, A, B, L; all_c, all_cd)
+function get_ground_state(::FullMatrixSolver, A, B, L; all_c, all_cd, kwargs...)
     if L > 16
         @warn "FullMatrixSolver is not efficient for L > 16. Consider using BitwiseSolver instead."
     end
@@ -12,12 +12,13 @@ function get_ground_state(::FullMatrixSolver, A, B, L; all_c, all_cd)
     return e[1], ψ0 ./ norm(ψ0)
 end
 
-function get_ground_state(solver::BitwiseSolver, A, B, L; ψstart=nothing)
+function get_ground_state(::BitwiseSolver, A, B, L; 
+                          ψstart=nothing, maxiter=1000, tol=1e-6, kwargs...)
     E0, ψ0, _ = bitwise_gaussian_groundstate(
                 A, B;
                 ψstart = ψstart,
-                maxiter = solver.maxiter,
-                tol = solver.tol
+                maxiter = maxiter,
+                tol = tol
     )
     return E0, ψ0 ./ norm(ψ0)
 end

@@ -10,7 +10,6 @@ using JLD2
 using KrylovKit
 using LaTeXStrings
 using CairoMakie
-using BenchmarkTools
 
 include("config.jl")
 include("gaussian_hamiltonian.jl")
@@ -36,7 +35,7 @@ export cost, optimize_gaussian, get_ground_state
 
 export pack_params, unpack_params, initial_params
 
-export mytheme
+export mytheme, latex_ticks
 
 export constrainedBasis, build_reversal_map, build_pxp_hamiltonian, build_projectors
 

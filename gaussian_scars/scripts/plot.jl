@@ -1,5 +1,8 @@
 include(joinpath(@__DIR__, "..", "src", "GaussianScars.jl"))
 using .GaussianScars
+using LaTeXStrings
+using LinearAlgebra
+using CairoMakie
 
 function size_styles(sizes)
     color_cycle = [:red, :green, :blue, :orange, :purple, :brown, :black, :cyan]
@@ -20,15 +23,16 @@ function plot_initial_states(cfg::PlotConfig = PlotConfig(); default_theme = tru
     z2_threshs = cfg.z2_thresholds
     ent_threshs = cfg.ent_thresholds
     solver = cfg.solver
+    dir = cfg.output_dir
 
     initial_plus = Dict{Int, Vector}()
     initial_minus = Dict{Int, Vector}()
     energies = Dict{Int, Vector}()
     colors, markers = size_styles(sizes)
 
-    for (L_i, L) in enumerate(sizes)
-        E, V, _, _ = scar_tower(L; z2_threshold = z2_threshs[L_i], ent_threshold = ent_threshs[L_i])
-        H, basis = build_pxp_hamiltonian(L)
+    for L in sizes
+        E, V, _, _ = scar_tower(L; z2_threshold = z2_threshs[L], ent_threshold = ent_threshs[L])
+        _, basis = build_pxp_hamiltonian(L)
         P_plus, P_minus = build_projectors(basis)
         reversal_map = build_reversal_map(L)
 
@@ -46,7 +50,7 @@ function plot_initial_states(cfg::PlotConfig = PlotConfig(); default_theme = tru
             A, B = initial_params(L, flip_first)
             _, ψ = get_ground_state(solver, A, B, L; all_c = all_c, all_cd = all_cd)
             ψ = Vector(ψ)
-            return symmetrize_state(ψ, L, reversal_map, sign)
+            return symmetrize_state(ψ, reversal_map, sign)
         end
 
         olaps_plus = []
@@ -82,8 +86,9 @@ function plot_initial_states(cfg::PlotConfig = PlotConfig(); default_theme = tru
         xticklabelsvisible=false,
         xgridvisible=false,
         ygridvisible=false,
-        limits=(0, 10, 0, 1.0),
-        yticks=0:0.2:1.0,
+        limits=(-0.1, 10.1, -0.02, 1.02),
+        yticks=latex_ticks(0:0.2:1.0),
+        xticks=latex_ticks(0:2:10),
     )
 
     ax2 = Axis(
@@ -92,8 +97,9 @@ function plot_initial_states(cfg::PlotConfig = PlotConfig(); default_theme = tru
         ylabel = L"|\langle \Psi_{\mathrm{init}}| \hat{P}_- | \Psi_{\mathrm{scar}} \rangle|^2",
         xgridvisible=false,
         ygridvisible=false,
-        limits=(0, 10, 0, 1.0),
-        yticks=0:0.2:1.0,
+        limits=(-0.1, 10.1, -0.02, 1.02),
+        yticks=latex_ticks(0:0.2:1.0),
+        xticks=latex_ticks(0:2:10),
     )
 
     legend_handles = []
@@ -119,7 +125,21 @@ function plot_initial_states(cfg::PlotConfig = PlotConfig(); default_theme = tru
            tellheight=false, tellwidth=false, halign=:right, valign=:center,
            margin=(10, 10, 10, 10))
 
-    rowgap!(fig.layout, 8)
+    rowgap!(fig.layout, 20)
     display(fig)
-    save(cfg.output_file, fig)
+    save(joinpath(dir, "initial_overlaps.png"), fig)
 end
+
+
+function main()
+    cfg = GaussianScars.PlotConfig(
+        sizes = [8, 10, 12, 14],
+        solver = FullMatrixSolver(),
+        z2_thresholds = Dict(8=>1e-5, 10=>1e-5, 12=>1e-5, 14=>1e-5),
+        ent_thresholds = Dict(8=>0.5, 10=>0.4, 12=>0.35, 14=>0.31),
+        output_dir = "../data/",
+    )
+    plot_initial_states(cfg; default_theme=false)
+end
+
+main()

@@ -20,8 +20,19 @@ end
 
 Base.@kwdef struct PlotConfig
     sizes::Vector{Int} = [8, 10, 12, 14]
-    z2_thresholds::Vector{Float64} = [1e-5, 1e-5, 1e-5, 1e-5]
-    ent_thresholds::Vector{Float64} = [0.5, 0.4, 0.35, 0.31]
+    z2_thresholds::Dict{Int,Float64} = Dict(
+        8 => 1e-5,
+        10 => 1e-5,
+        12 => 1e-5,
+        14 => 1e-5,
+    )
+
+    ent_thresholds::Dict{Int,Float64} = Dict(
+        8 => 0.5,
+        10 => 0.4,
+        12 => 0.35,
+        14 => 0.31,
+    )
     output_dir::String = "data"
     solver::GaussianSolver = FullMatrixSolver()
 end
