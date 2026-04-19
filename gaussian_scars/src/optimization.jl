@@ -9,7 +9,7 @@ function get_ground_state(::FullMatrixSolver, A, B, L; all_c, all_cd, kwargs...)
     H = gaussian_hamiltonian(L, A, B, all_c, all_cd)
     e, v = eigs(H, nev=1, which=:SR)
     ψ0 = v[:, 1]
-    return e[1], ψ0 ./ norm(ψ0)
+    return real(e[1]), ψ0 ./ norm(ψ0)
 end
 
 function get_ground_state(::BitwiseSolver, A, B, L; 
@@ -69,7 +69,7 @@ function optimize_gaussian(ψ_scar::Vector, L::Int, E_target::Float64, reversal_
                     Optim.Options(iterations = max_nm, show_trace = true))
     
     res2 = optimize(obj, res1.minimizer, LBFGS(), 
-                    Optim.Options(g_tol = 1e-12, 
+                    Optim.Options(g_tol = 1e-10, 
                                   x_abstol = 1e-8, 
                                   f_abstol = 1e-8, 
                                   iterations = max_lbfgs, 
@@ -131,7 +131,7 @@ function run_optimization(cfg)
         ψ_f = embed_to_full(ψ, basis, L)
         πψ_f = similar(ψ_f)
         apply_spatial_inversion!(πψ_f, ψ_f, reversal_map)
-        sign = norm(ψ_f + πψ_f) < 1e-14 ? -1.0 : 1.0
+        sign = real(dot(ψ_f, πψ_f)) > 0 ? 1.0 : -1.0
 
         A_p, B_p, ψ_p, olap_p = optimize_gaussian(ψ_plus_emb, L, E_targ, reversal_map, sign,
                                                   solver;

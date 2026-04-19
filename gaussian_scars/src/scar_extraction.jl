@@ -73,4 +73,5 @@ function view_scars(L::Int; z2_threshold=1e-5, ent_threshold=0.31)
     ax = Axis(fig[1, 1], xlabel=L"E/N", ylabel = L"\log_{10} |\langle Z_2 | \Psi_n \rangle|^2")
     scatter!(ax, E, log10.(olaps), color=:blue, markersize=8)
     display(fig)
+    println("If your scar selection parameters are correct, you should see a half parabola with L/2 points with an almost constant energy gap.")
 end
